@@ -1,4 +1,6 @@
 import asyncio
+import ssl
+
 import aiohttp
 import json
 from typing import Optional
@@ -6,11 +8,15 @@ from typing import Optional
 BASE_URL = "https://api.music.yandex.net/artists"
 MAX_CONCURRENT = 100
 CONSECUTIVE_FAIL_LIMIT = 100
-START_ID = 4463796
+START_ID = 7174196
 MAX_RETRIES = 3
 
 results = {}
 lock = asyncio.Lock()
+
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
 
 
 async def fetch_artist(session: aiohttp.ClientSession, artist_id: int) -> Optional[dict]:
@@ -19,13 +25,13 @@ async def fetch_artist(session: aiohttp.ClientSession, artist_id: int) -> Option
     try:
         for att in range(MAX_RETRIES):
             print(f'trying to fetch {url}')
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), ssl_context=ssl_context) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return {"id": artist_id, "data": data}
                 elif resp.status == 429:
                     wait = int(resp.headers.get("Retry-After", retry_delay))
-                    print(f"[{artist_id}] Rate limited, waiting {wait}s (attempt {attempt + 1})")
+                    print(f"[{artist_id}] Rate limited, waiting {wait}s (attempt {att + 1})")
                     await asyncio.sleep(wait)
                     retry_delay *= 2
                 elif resp.status == 404:

@@ -1,214 +1,194 @@
 """
 Yandex Music Artist Analytics
 -------------------------------
-Usage:
-    python music_analytics.py --file your_data.jsonl
+Streams JSONL into SQLite, then plots monthly listeners for all artists.
 
-The input file should be a JSONL file (one JSON object per line),
-matching the format returned by the Yandex Music artist API.
+Usage:
+    python music_analytics.py --file your_data.jsonl [--out listeners.png] [--db keep.db]
 """
 
 import json
 import argparse
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
-from collections import defaultdict
 
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import numpy as np
 
 
 # ─────────────────────────────────────────────
-# Parsing helpers
+# Database setup
 # ─────────────────────────────────────────────
 
-def load_records(path: str) -> list[dict]:
-    records = []
+LIST_THRESHOLD = 100000
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS artists (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    tracks            INTEGER DEFAULT 0,
+    direct_albums     INTEGER DEFAULT 0,
+    also_albums       INTEGER DEFAULT 0,
+    also_tracks       INTEGER DEFAULT 0,
+    monthly_listeners INTEGER DEFAULT 0,
+    likes             INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS genres (
+    artist_id TEXT,
+    genre     TEXT,
+    PRIMARY KEY (artist_id, genre)
+);
+
+CREATE TABLE IF NOT EXISTS albums (
+    artist_id   TEXT,
+    title       TEXT,
+    year        INTEGER,
+    track_count INTEGER DEFAULT 0,
+    PRIMARY KEY (artist_id, title)
+);
+
+CREATE TABLE IF NOT EXISTS popular_tracks (
+    artist_id  TEXT,
+    position   INTEGER,
+    title      TEXT,
+    duration_s REAL,
+    PRIMARY KEY (artist_id, position)
+);
+"""
+
+def open_db(path: str) -> sqlite3.Connection:
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.executescript(SCHEMA)
+    return con
+
+
+# ─────────────────────────────────────────────
+# Streaming ingest
+# ─────────────────────────────────────────────
+
+def iter_records(path: str):
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                yield json.loads(line)
             except json.JSONDecodeError as e:
-                print(f"[WARN] Skipping bad line: {e}", file=sys.stderr)
-    return records
+                print(f"[WARN] Line {lineno} skipped: {e}", file=sys.stderr)
 
 
-def extract_artist(record: dict) -> dict | None:
-    """Flatten one top-level record into a usable dict."""
-    try:
-        result = record["data"]["data"]["result"]
-        artist = result["artist"]
+def ingest(path: str, con: sqlite3.Connection) -> tuple[int, int, int]:
+    total = skipped = more_threshold = 0
 
-        # skip unavailable / empty artist stubs
-        if not artist.get("available", False):
-            return None
-
-        counts = artist.get("counts", {})
-        stats  = result.get("stats", {})
-
-        popular_tracks = result.get("popularTracks", [])
-        albums         = result.get("albums", [])
-
-        return {
-            "id":              artist["id"],
-            "name":            artist["name"],
-            "genres":          artist.get("genres", []),
-            "tracks":          counts.get("tracks", 0),
-            "direct_albums":   counts.get("directAlbums", 0),
-            "also_albums":     counts.get("alsoAlbums", 0),
-            "also_tracks":     counts.get("alsoTracks", 0),
-            "likes":           artist.get("likesCount", 0),
-            "monthly_listeners": stats.get("lastMonthListeners", 0),
-            "popular_tracks":  [
-                {
-                    "title":       t["title"],
-                    "duration_s":  t["durationMs"] / 1000,
-                    "lyrics":      t.get("lyricsAvailable", False),
-                }
-                for t in popular_tracks
-            ],
-            "albums": [
-                {
-                    "title": a["title"],
-                    "year":  a.get("year"),
-                    "tracks": a.get("trackCount", 0),
-                }
-                for a in albums
-            ],
-        }
-    except (KeyError, TypeError):
-        return None
-
-
-# ─────────────────────────────────────────────
-# Plotting functions
-# ─────────────────────────────────────────────
-
-COLORS = plt.cm.tab10.colors
-
-
-def plot_track_durations(artists: list[dict], ax: plt.Axes) -> None:
-    """Bar chart: popular track durations for each artist."""
-    for i, artist in enumerate(artists):
-        tracks = artist["popular_tracks"]
-        if not tracks:
-            continue
-        titles    = [t["title"] for t in tracks]
-        durations = [t["duration_s"] / 60 for t in tracks]   # minutes
-        x = np.arange(len(titles))
-        ax.bar(x + i * 0.25, durations, width=0.25,
-               label=artist["name"], color=COLORS[i % len(COLORS)], alpha=0.85)
-
-    ax.set_title("Popular Track Durations (minutes)", fontsize=13, fontweight="bold")
-    ax.set_ylabel("Duration (min)")
-    ax.set_xlabel("Track index")
-    ax.legend(fontsize=8)
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
-
-
-def plot_album_timeline(artists: list[dict], ax: plt.Axes) -> None:
-    """Scatter plot: albums placed on a year timeline, sized by track count."""
-    for i, artist in enumerate(artists):
-        for album in artist["albums"]:
-            year = album.get("year")
-            if not year:
+    for record in iter_records(path):
+        total += 1
+        try:
+            result = record["data"]["data"]["result"]
+            artist = result["artist"]
+            if not artist.get("available", False):
+                skipped += 1
                 continue
-            ax.scatter(year, i,
-                       s=album["tracks"] * 20,
-                       color=COLORS[i % len(COLORS)],
-                       alpha=0.75, edgecolors="white", linewidths=0.5,
-                       label=artist["name"] if album == artist["albums"][0] else "")
-            ax.annotate(album["title"], (year, i),
-                        textcoords="offset points", xytext=(5, 3),
-                        fontsize=6.5, color="grey")
 
-    ax.set_title("Album Timeline (bubble size = track count)", fontsize=13, fontweight="bold")
-    ax.set_xlabel("Year")
-    ax.set_yticks(range(len(artists)))
-    ax.set_yticklabels([a["name"] for a in artists])
-    ax.grid(axis="x", linestyle="--", alpha=0.5)
+            aid    = artist["id"]
+            name   = artist["name"]
+            counts = artist.get("counts", {})
+            stats  = result.get("stats", {})
 
+            con.execute("""
+                INSERT INTO artists
+                    (id, name, tracks, direct_albums, also_albums, also_tracks,
+                     monthly_listeners, likes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    tracks            = MAX(tracks,            excluded.tracks),
+                    direct_albums     = MAX(direct_albums,     excluded.direct_albums),
+                    also_albums       = MAX(also_albums,       excluded.also_albums),
+                    also_tracks       = MAX(also_tracks,       excluded.also_tracks),
+                    monthly_listeners = MAX(monthly_listeners, excluded.monthly_listeners),
+                    likes             = MAX(likes,             excluded.likes)
+            """, (
+                aid, name,
+                counts.get("tracks", 0),
+                counts.get("directAlbums", 0),
+                counts.get("alsoAlbums", 0),
+                counts.get("alsoTracks", 0),
+                stats.get("lastMonthListeners", 0),
+                artist.get("likesCount", 0),
+            ))
 
-def plot_catalog_breakdown(artists: list[dict], ax: plt.Axes) -> None:
-    """Grouped bar chart: tracks, direct albums, also-albums per artist."""
-    names  = [a["name"] for a in artists]
-    tracks = [a["tracks"]       for a in artists]
-    direct = [a["direct_albums"] for a in artists]
-    also   = [a["also_albums"]   for a in artists]
+            for g in artist.get("genres", []):
+                con.execute("INSERT OR IGNORE INTO genres VALUES (?, ?)", (aid, g))
 
-    x   = np.arange(len(names))
-    w   = 0.25
+            for a in result.get("albums", []):
+                con.execute("""
+                    INSERT OR IGNORE INTO albums (artist_id, title, year, track_count)
+                    VALUES (?, ?, ?, ?)
+                """, (aid, a.get("title", ""), a.get("year"), a.get("trackCount", 0)))
 
-    ax.bar(x - w,  tracks, w, label="Tracks",        color="#4C72B0", alpha=0.85)
-    ax.bar(x,      direct, w, label="Direct Albums",  color="#DD8452", alpha=0.85)
-    ax.bar(x + w,  also,   w, label="Also-in Albums", color="#55A868", alpha=0.85)
+            existing = con.execute(
+                "SELECT COUNT(*) FROM popular_tracks WHERE artist_id=?", (aid,)
+            ).fetchone()[0]
+            if existing == 0:
+                for pos, t in enumerate(result.get("popularTracks", [])):
+                    con.execute("""
+                        INSERT OR IGNORE INTO popular_tracks
+                            (artist_id, position, title, duration_s)
+                        VALUES (?, ?, ?, ?)
+                    """, (aid, pos, t.get("title", ""), t.get("durationMs", 0) / 1000))
+            if stats.get("lastMonthListeners", 0) >= LIST_THRESHOLD:
+                more_threshold += 1
+        except (KeyError, TypeError):
+            skipped += 1
+            continue
 
-    ax.set_title("Catalog Breakdown per Artist", fontsize=13, fontweight="bold")
-    ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=15, ha="right", fontsize=9)
-    ax.set_ylabel("Count")
-    ax.legend()
-    ax.grid(axis="y", linestyle="--", alpha=0.5)
+        if total % 5000 == 0:
+            con.commit()
+            print(f"  … {total} records processed", flush=True)
 
-
-def plot_genre_distribution(artists: list[dict], ax: plt.Axes) -> None:
-    """Pie chart of genre counts across all artists."""
-    genre_counts: dict[str, int] = defaultdict(int)
-    for artist in artists:
-        for g in artist["genres"]:
-            genre_counts[g] += 1
-
-    if not genre_counts:
-        ax.text(0.5, 0.5, "No genre data available",
-                ha="center", va="center", transform=ax.transAxes, fontsize=11)
-        ax.set_title("Genre Distribution", fontsize=13, fontweight="bold")
-        return
-
-    labels = list(genre_counts.keys())
-    sizes  = list(genre_counts.values())
-    ax.pie(sizes, labels=labels, autopct="%1.0f%%",
-           colors=COLORS[:len(labels)], startangle=90,
-           wedgeprops={"edgecolor": "white"})
-    ax.set_title("Genre Distribution", fontsize=13, fontweight="bold")
-
-
-def plot_monthly_listeners(artists: list[dict], ax: plt.Axes) -> None:
-    """Horizontal bar chart of monthly listeners."""
-    names     = [a["name"] for a in artists]
-    listeners = [a["monthly_listeners"] for a in artists]
-
-    y = np.arange(len(names))
-    bars = ax.barh(y, listeners, color=COLORS[:len(names)], alpha=0.85)
-    ax.bar_label(bars, fmt="%d", padding=3, fontsize=8)
-    ax.set_title("Monthly Listeners (last month)", fontsize=13, fontweight="bold")
-    ax.set_yticks(y)
-    ax.set_yticklabels(names)
-    ax.set_xlabel("Listeners")
-    ax.grid(axis="x", linestyle="--", alpha=0.5)
+    con.commit()
+    return total, skipped, more_threshold
 
 
 # ─────────────────────────────────────────────
-# Main dashboard
+# Plot
 # ─────────────────────────────────────────────
 
-def build_dashboard(artists: list[dict], output_path: str = "dashboard.png") -> None:
-    fig = plt.figure(figsize=(18, 14))
-    fig.suptitle("Yandex Music Artist Analytics Dashboard",
-                 fontsize=16, fontweight="bold", y=0.98)
+def plot_monthly_listeners(con: sqlite3.Connection, output_path: str) -> None:
+    """
+    Histogram of monthly listeners across ALL artists.
+    Cursor-iterated — one value at a time, never a full list in memory.
+    """
+    listeners = []
+    for (val,) in con.execute(
+        "SELECT monthly_listeners FROM artists WHERE monthly_listeners > 0"
+    ):
+        listeners.append(val)
 
-    gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.45, wspace=0.35)
+    if not listeners:
+        sys.exit("[ERROR] No listener data found.")
 
-    plot_catalog_breakdown(artists,   fig.add_subplot(gs[0, :]))   # full width
-    plot_album_timeline(artists,      fig.add_subplot(gs[1, :]))   # full width
-    plot_track_durations(artists,     fig.add_subplot(gs[2, 0]))
-    plot_monthly_listeners(artists,   fig.add_subplot(gs[2, 1]))
+    fig, axes = plt.subplots(1, 1, figsize=(14, 5))
+    fig.suptitle(f"Monthly Listeners — {len(listeners):,} artists",
+                 fontsize=14, fontweight="bold")
 
+    # Log scale — more useful when a few artists dominate
+    bin_width = 20000
+    bins = np.arange(0, max(listeners) + bin_width, bin_width)
+    axes.hist(listeners, bins=bins, color="#DD8452", alpha=0.85, edgecolor="white", log=True)
+    axes.set_title("Log scale  (shows long tail)")
+    axes.set_xlabel("Listeners last month")
+    axes.set_ylabel("Number of artists (log)")
+    axes.grid(axis="y", linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
-    print(f"[OK] Dashboard saved → {output_path}")
+    print(f"[OK] Chart saved → {output_path}")
     plt.show()
 
 
@@ -217,22 +197,29 @@ def build_dashboard(artists: list[dict], output_path: str = "dashboard.png") -> 
 # ─────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Yandex Music artist analytics")
+    parser = argparse.ArgumentParser(description="Yandex Music — monthly listeners chart")
     parser.add_argument("--file", required=True, help="Path to the .jsonl data file")
-    parser.add_argument("--out",  default="dashboard.png", help="Output image path")
+    parser.add_argument("--out",  default="listeners.png", help="Output image path")
+    parser.add_argument("--db",   default=None,
+                        help="SQLite DB path (default: temp file, deleted after run)")
     args = parser.parse_args()
 
     if not Path(args.file).exists():
         sys.exit(f"[ERROR] File not found: {args.file}")
 
-    records = load_records(args.file)
-    artists = [a for r in records if (a := extract_artist(r)) is not None]
+    use_temp = args.db is None
+    db_path  = args.db or tempfile.mktemp(suffix=".db")
 
-    if not artists:
-        sys.exit("[ERROR] No valid artist records found in the file.")
-
-    print(f"[INFO] Loaded {len(artists)} artist(s): {[a['name'] for a in artists]}")
-    build_dashboard(artists, args.out)
+    try:
+        con = open_db(db_path)
+        print(f"[INFO] Ingesting {args.file} …")
+        total, skipped, more_threshold = ingest(args.file, con)
+        print(f"[INFO] Done — {total} records, {skipped} skipped, {more_threshold} is more threshold {LIST_THRESHOLD}")
+        plot_monthly_listeners(con, args.out)
+        con.close()
+    finally:
+        if use_temp:
+            Path(db_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
