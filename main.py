@@ -6,7 +6,7 @@ from typing import Optional
 BASE_URL = "https://api.music.yandex.net/artists"
 MAX_CONCURRENT = 100
 CONSECUTIVE_FAIL_LIMIT = 100
-START_ID = 1789971
+START_ID = 4463796
 MAX_RETRIES = 3
 
 results = {}
@@ -47,7 +47,7 @@ async def main():
         consecutive_failures = 0
         total_collected = 0
 
-        with open("artists.json", "a") as f:
+        with open("artists.jsonl", "a") as f:
             while consecutive_failures < CONSECUTIVE_FAIL_LIMIT:
                 batch_ids = list(range(artist_id, artist_id + MAX_CONCURRENT))
                 artist_id += MAX_CONCURRENT
