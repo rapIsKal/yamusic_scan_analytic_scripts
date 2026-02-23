@@ -4,3 +4,4 @@ Usage:
 
 1 python main.py
 2 python music_analytics.py --file artists.jsonl --out dashboard.png
+3 
