@@ -8,7 +8,7 @@ from typing import Optional
 BASE_URL = "https://api.music.yandex.net/artists"
 MAX_CONCURRENT = 100
 CONSECUTIVE_FAIL_LIMIT = 100
-START_ID = 7174196
+START_ID = 10017196
 MAX_RETRIES = 3
 
 results = {}
