@@ -142,7 +142,7 @@ def main():
 
     ax.set_xlabel("N  (monthly listeners)", fontsize=11)
     ax.set_ylabel("Artists with > N listeners  (log scale)", fontsize=11)
-    ax.set_title(r"CCDF fit:  $y = C \cdot x^a \cdot e^{-(x/b)^\lambda}$",
+    ax.set_title(r"Over-threshold fit:  $y = C \cdot x^a \cdot e^{-(x/b)^\lambda}$",
                  fontsize=13, fontweight="bold")
     ax.legend(fontsize=10)
     ax.grid(linestyle="--", alpha=0.4)
